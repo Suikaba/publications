@@ -1,0 +1,634 @@
+\documentclass[a4j,11pt,openright]{jsbook}
+\hyphenation{Ghost-script Post-Script}
+\usepackage{okumacro}
+\usepackage{indent}
+\usepackage{ascmac}
+\usepackage{newtxtext,newtxmath}
+%\setlength{\evensidemargin}{-1in}
+%\setlength{\oddsidemargin}{-1in}
+%\addtolength{\evensidemargin}{17mm}
+%\addtolength{\oddsidemargin}{26mm}
+\setlength{\textwidth}{\fullwidth}
+\setlength{\textheight}{38\baselineskip}
+\setlength{\evensidemargin}{\oddsidemargin}
+%\addtolength{\textheight}{\topskip}
+\setcounter{chapter}{-1}
+\makeatletter
+\renewcommand{\chapter}{\@startsection {chapter}{1}{\z@}{-3.5ex \@plus -1ex \@minus -.2ex}{2.3ex \@plus.2ex}
+{\normalfont\LARGE\bfseries}}
+
+  %\renewcommand{\section}{\@startsection {section}{1}{\z@}{-3.5ex \@plus -1ex \@minus -.2ex}{2.3ex \@plus.2ex}
+  %{\normalfont\large\bfseries}}
+\makeatother
+\renewcommand\thefootnote{*\arabic{footnote}}
+\title{C++と例外安全}
+\author{@suibaka}
+\date{2014年5月}
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+\chapter{序論}
+本記事は、「C++における例外安全の重要性、およびそれを実現するための手法」を解説するものである.言わずと知れた「Exceptional C++」シリーズは、C++03における例外安全について述べられていた名著であるが、本記事は最新のC++規格に則った、例外安全へのより新しいアプローチを示す.
+
+第1章では、例外安全とは何かについて述べる.第2章では、例外安全なプログラムを組むための考え方を示す.
+
+なお、本記事の読者は
+
+\begin{itemize}
+    \item C++の基本構文を理解している者
+    \item C++11で導入された言語機能、特にムーブセマンティクスを理解している者
+    \item より強固で安全なプログラムを組もうと考えている者
+\end{itemize}
+
+を想定している.
+
+\chapter{例外安全概要}
+
+\section{例外安全とは}
+例外安全とは、プログラムが予期せぬエラーを引き起こし、例外を投げた場合でも、プログラムの状態が破壊されず、かつリソースリークを起こさないことを指す.
+
+例えば、以下のようなコードは例外安全ではない.
+
+\begin{verbatim}
+  void f() {
+    int* ip = new int(10);
+
+    // 例外をなげうる処理
+    some_process();
+
+    delete ip;
+  }
+\end{verbatim}
+
+関数\verb|some_process()|が例外を投げた場合、\verb|delete|が呼び出される前に関数を脱出するため、動的に確保されたメモリが解放されずに残されてしまう.さらに、脱出した時点で、確保されたメモリの情報を失ってしまい、関数\verb|f|の呼び出し側でメモリリークに対応できない.
+
+\section{例外安全保証について}
+
+プログラムが例外安全であるということは、それが「基本的保証」「強い保証」「no-fail保証」\footnote{\texttt{これらの保証の名前は、特に厳密に決まっていないが、本記事ではこれらで統一する.}}のいずれかを満たしていることである.以下に、それぞれが何を意味するかをまとめた.
+
+\begin{description}
+  \item[\textbf{基本的保証}]\mbox{}\\
+    失敗した操作によってプログラムの状態が変更されても、リソースリークが発生しないこと.また、影響を受けたオブジェクト等が矛盾のない状態で利用可能であること(内部状態の整合性が保たれているという).ただしこの時、その状態が予測可能である必要はない.
+  \item[\textbf{強い保証}]\mbox{}\\
+    操作に失敗したとしても、操作対象のオブジェクトの状態が一切変更されない(操作直前の状態に戻る)こと.つまり、操作が終わった時、オブジェクトは操作が完全に成功した状態か、操作直前の状態のどちらかに必ずなっている.
+  \item[\textbf{no-fail(no-throw)保証}]\mbox{}\\
+    操作によって例外が発生することはないこと.
+  \item[例外中立]\mbox{}\\
+    ある関数内部で行われた操作によって例外が投げられた場合、その例外を関数の呼び出し元に伝播させること.すなわち、関数は例外を捕捉して特別な処理を行わない.
+\end{description}
+
+4つ目の「例外中立」は保証ではないのだが、例外安全を語る上で外せない単語であるため、覚えておくとよいだろう.
+
+\chapter{例外安全へのアプローチ}
+
+この章では、例外安全なプログラムを書くための指針、及び手法を説明する.
+
+\section{try/catchはどこに書くべきか}
+
+\verb|throw|をどこに書くか、これは明らかだ.予期せぬ失敗が起こった時に、それを通知するために書けばよい.
+
+では、\verb|try/catch|はどこに書けばよいか.少なくとも、何も考えずに例外をなげうる操作のたびに書くというのでは話にならない.\ \verb|try/catch|を書くのは、大抵、以下の場合においてである.
+
+\begin{itemize}
+  \item 投げられた例外を、別の例外に変換する場合.
+  \item 操作の一部で例外が投げられても、それを許容出来、処理を続けたい場合.
+  \item 投げられた例外に対して、何かしら後処理ができ、そうしたい場合.
+\end{itemize}
+
+当然だが、後処理もできないような場所で例外を\verb|catch|しても意味が無い.その場合は、例外中立でなければならない.そして、適切な処理が行える場所で初めて、例外を\verb|catch|する.
+
+\begin{verbatim}
+  // ライブラリ側のコード. some_process()は例外をなげうる関数
+  resource load_resource(int id) {
+    // ...
+    some_process(); // ここで例外が投げられた時、どう対処するかは
+                    // ライブラリ使用者に委ねるべき.考えられる選択肢は、
+                    // 1: catchして後処理をした後、例外をrethrowあるいは変換する
+                    // 2: 何もしない(例外中立)
+                    // のどちらか.
+    // ...
+  }
+
+  // ユーザー側のコード
+  void f() {
+    try {
+      auto rc = load_resource(RESOURCE_ID);
+    } catch (...) {
+      // ここで、失敗に対する処理を行う(ログを取る、rethrowする、etc...)
+    }
+  }
+\end{verbatim}
+
+\section{catchで受ける型は参照で}
+
+\verb|catch|で受ける型は参照型にすべきである.例外的に、組み込み型やポインタであれば、参照でなくともよい\footnote{\texttt{組み込み型やポインタを受けるcatchを書くことは全くといっていいほど無いので、気にしなくともよい}}.これを守ることで、コピーによって例外が投げられたり、スライシングが起こったりすることを防ぐことが出来る.
+
+\begin{verbatim}
+  class my_exception : public std::exception { /* ... */ };
+  void g() { throw my_exception; }
+  void f() {
+    try {
+      g();
+    } catch(my_exception& const ex) { // catch(my_exception ex)は良くない形
+      // ...
+    }
+  }
+\end{verbatim}
+
+\section{デストラクタで例外を投げない}
+
+これは有名なので、あえて細かく説明はしない.デストラクタが例外を投げると、どのように工夫しても例外安全なプログラムは組めなくなる.同様に、リソースの解放を行う関数も、例外を投げるべきではない.
+
+\section{ムーブコンストラクタ、ムーブ代入演算子で例外を投げない}
+
+ムーブコンストラクタ、及びムーブ代入演算子は例外を投げるべきではない.これらが例外を投げる可能性があると、複数のオブジェクトを同時にムーブしたりするときに、例外安全の強い保証が満たせなくなってしまう.また、これらが例外を投げない場合、例外安全なプログラムが組みやすくなるという側面もある.
+
+例えば、以下のようにコピー代入演算子の実装や、ローカル変数を関数外に返す時などに有用である\footnote{\texttt{C++03以前では、ローカル変数を戻り値として使用する場合、コピーが発生してしまった(RVOがはたらく場合もある)が、最新のC++では可能なら自動でムーブされるようになっている.コピーは例外をなげうるため、ムーブが行えると楽.}}.
+
+\begin{verbatim}
+  class foo {
+  public:
+    // ...
+    foo& operator=(foo&&) = default; // 例外を投げない
+    foo& operator=(foo& const rhs) {
+      return *this = foo(rhs); // copy & move
+    }
+  };
+
+  some_class f() {
+    some_class s;
+    // ...
+    return s; // 自動で move される
+  }
+\end{verbatim}
+
+ここで使われているcopy and moveの手法はかなり有用であるから、ぜひ覚えておいてほしい.ただし注意点として、この手法を用いる場合はムーブ代入演算子を定義して置かなければならない.\ \verb|= default|で定義できる場合はいいが、できない時もあるので気をつけよう.
+
+\section{swap関数で例外を投げない}
+
+関数\verb|swap|に関しても、例外を投げてはならない.なぜなら、\verb|swap|関数は、例外安全なコピー代入演算子を実装するために必要な関数であるからだ.
+
+実は、C++03時代の\verb|swap|を用いた手法は、ムーブセマンティクスで一部代用可能である.しかしながら、C++11の環境で書いていたとしても、C++03時代のライブラリを使っていて、それがムーブに対応していないことも有るだろう.あるいは、そもそもC++11が使えない環境であるかもしれない.そのような場合では、例外を投げない\verb|swap|関数が必須になってくる.
+
+\begin{verbatim}
+  class widget {
+    T1 t1;
+    T2 t2;
+  public:
+    widget() = default;
+    widget(T1 t1_, T2 t2_) : t1(std::move(t1_)), t2(std::move(t2_))
+    {}
+    widget(widget const&) = default;
+    widget(widget&&) = default;
+
+    widget& operator=(widget rhs) noexcept {
+      this->swap(rhs);
+      return *this;
+    }
+
+    void swap(widget& other) noexcept {
+      using std::swap;
+      swap(t1, other.t1);
+      swap(t2, other.t2);
+    }
+    friend void swap(widget& lhs, widget& rhs) noexcept {
+      lhs.swap(rhs);
+    }
+  };
+
+\end{verbatim}
+
+ちなみに、標準で用意されている\verb|std::swap|は、C++11からはムーブで行われるようになっている.
+
+\begin{verbatim}
+  template <typename T>
+  void swap(T& a, T& b)
+    noexcept(noexcept(
+      std::is_nothrow_move_constructible<T>::value &&
+      std::is_nothrow_move_assignable<T>::value))
+  { /* ... */ }
+\end{verbatim}
+
+見てもらえれば分かる通り、ムーブコンストラクタとムーブ代入演算子が例外を投げないのであれば、自前で\verb|swap|を定義しなくとも例外安全な\verb|swap|が手に入るようになっている.
+
+
+\section{コピー代入演算子は強い保証を満たそう}
+
+代入演算子は、強い保証を満たすべきである.これは、操作が失敗したことによって、オブジェクトの内部情報が永遠に失われるのを防ぐためである.
+
+\section{スマートポインタを使おう}
+
+スマートポインタを使用することで\verb|delete|忘れといったミスを防ぐ事が出来る.また、例外が投げられてスコープを脱出した時も自動でメモリを開放してくれる.使用方法も通常のポインタと何ら変わりがないので、理由がないならこちらを使うべきだ.
+
+\begin{verbatim}
+  {
+    std::shared_ptr<int> p = std::make_shared(10);
+    int i = *p; // i == 10
+    p = std::make_shared(20); // もともと指していたメモリは解放
+  } // スコープを抜ける時、自動でメモリを解放
+\end{verbatim}
+
+\section{出来る限りnewを書かない}
+
+もちろん、動的確保をするなといっているわけではない.しかしながら、\verb|new|を直接書くようなコードは、思わぬメモリリークを招く結果になることがある.例えば、以下のコードを考える.
+
+\begin{verbatim}
+  void f(int* p1, int* p2);
+
+  f(new int(10), new int(20)); // (1)
+
+  using std::shared_ptr;
+  void g(shared_ptr<int> p1, shared_ptr<int> p2);
+
+  g(shared_ptr<int>(new int(10)), shared_ptr<int>(new int(20))); // (2)
+\end{verbatim}
+
+(1)は一見何も問題がないように見えるが、このコードは例外安全ではない.なぜなら、一方の\verb|new|が成功した後、もう一方の\verb|new|が失敗して例外を投げると、最初に確保されたメモリが破棄されないまま放置されるからだ.
+
+(2)は、(1)の問題に対してスマートポインタを用いることで、問題を回避しているように思える.が、残念ながらこれも同様に例外安全でない.これはC++の関数の引数式の評価順に起因する.
+
+\begin{verbatim}
+  f(g(expr1), g(expr2));
+\end{verbatim}
+
+上記の関数呼び出しで、\verb|expr1|、\verb|expr2|、\verb|g(expr1)|、\verb|g(expr2)|の評価順はどのようになるだろうか.
+
+C++では、この関数呼び出しにおいて、次の規則に従っている限り、引数式は「どのような順で評価されても良い」という事になっている.
+
+\begin{itemize}
+  \item \verb|expr1|は、\verb|g()|が呼び出される前に評価されていなければならない
+  \item \verb|expr2|も同様.
+  \item \verb|g()|は、\verb|f()|が呼び出される前に処理を完了していなければならない
+  \item \verb|expr1|と\verb|expr2|は交互に評価されても良い.
+\end{itemize}
+
+ここで重要なのは、一番最後である.この規則によれば、(2)の場合でも、\verb|new int(10)|が呼び出された後、\verb|shared_ptr|のコンストラクタが呼ばれる前に\verb|new int(20)|が評価される可能性がある(その逆もありうる).
+
+この問題は、スマートポインタを作成するヘルパー関数を用いることで解決できる.
+
+\begin{verbatim}
+  g(std::make_shared(10), std::make_shared(20));
+\end{verbatim}
+
+\verb|make_shared()|はそれ自体が例外安全の強い保証を満たしているから、メモリリークの心配は無い.
+
+もちろん、以下のように書いても良い.
+
+\begin{verbatim}
+  shared_ptr<int> p1(new int(10));
+  shared_ptr<int> p2(new int(20));
+  g(p1, p2);
+\end{verbatim}
+
+が、一般的に\verb|make_shared|のほうが高速であるし、わざわざ\verb|new|を使う必要もない.
+
+大切なのは、\verb|new|\textbf{をできるだけ用いずにスマートポインタ、及びそれに関連するヘルパー関数を使う}ということである.
+
+\section{RAII}
+
+RAII(Resource Acquisition Is Initialization)とは、リソースの確保と解放を、それぞれオブジェクトの初期化と破棄と同時に行う(コンストラクタでリソースを確保し、デストラクタで解放する)手法である.これも、リソースリークを防ぐことにつながる.スマートポインタも一種のRAIIである.以下のコードは、RAIIを用いたリソース管理の例である.
+
+\begin{verbatim}
+  some_data load(std::string path);
+  void release(some_data& const data);
+
+  class resource {
+  public:
+    resource(std::string path)
+      : data_(load(std::move(path)))
+    {}
+    ~resource() {
+      release(data_)
+    }
+
+  private:
+    some_data data_;
+  };
+
+  void f() {
+    resource rc("data/img/01.png");
+    bool success = false;
+    // ...
+    if(success) throw runtime_error("Error!");
+  } // 例外が投げられても、正しくsome_dataの解放が行われる
+\end{verbatim}
+
+\section{強い保証が必要な時は}
+
+強い保証を満たすためのアプローチを考える前に、言っておくことがある.
+
+それは、強い例外安全を保証する場合、しばしばパフォーマンスの犠牲を強いるということである.また、大抵の場合、強い保証を満たさなくとも、基本的保証で事足りる事が多い.だから、すべての関数が強い保証を満たす必要はない.
+
+\subsection{関数が持つ役割を一つにする}
+
+単一の関数内に関連性のない複数の処理があると、例外安全の強い保証を満たすことができない場合が多い.そのような場合には、それぞれの処理ごとに関数を分割することが必要になってくる.
+
+また、処理を分割することで、強い保証だけでなく、プログラムの再利用性も高めることが出来る.
+
+\subsection{例外をなげうる操作とそうでない操作の線引きをする}
+
+例外安全の強い保証を満たす関数を書く時には、例外を投げる操作と投げない操作を分けて考え、適切な順番で呼び出すことが必要である.
+
+このことを、強い保証を満たすべきである関数の代表例である、コピー代入演算子で確認してみる.
+
+\begin{verbatim}
+  // T1, T2は共に例外を投げないswapメンバ関数を持っている
+  class widget {
+  public:
+    widget& operator=(widget const& rhs) {
+      T1 tmp1(rhs.t1); // (1)
+      t1.swap(tmp1);   // no throw
+      T2 tmp2(rhs.t2); // (2)
+      t2.swap(tmp2);   // no throw
+    }
+  private:
+    T1 t1;
+    T2 t2;
+  };
+\end{verbatim}
+
+上記のコードで、例外をなげうる操作は(1)と(2)である.上記のように、例外を投げる操作と投げない操作が不規則に並んでいると、強い保証を満たすことができない.実際、\verb|T2|のコピーコンストラクタが例外を投げると、この関数は強い保証を満たすことができない.なぜなら、\verb|t1|に関する処理は完了していて、巻き戻すことができないからだ.
+
+解決策は、最初に述べたとおり、例外を投げる操作と、投げない操作を分けることである.例外をなげうる操作を完了してから、例外を投げない操作だけを用いてオブジェクトの状態を変更する.
+
+\begin{verbatim}
+  T1 tmp1(rhs.t1);
+  T2 tmp2(rhs.t2);
+  //-----線引き(上:例外をなげうる 下:例外を投げない)-----//
+  t1.swap(tmp1);
+  t2.swap(tmp2);
+\end{verbatim}
+
+この考え方は、もちろんコピー代入演算子以外でも有用である.
+
+\section{Cスタイルの戻り値によるエラーハンドリングと例外との比較}
+
+例外機構があるC++においても、Cスタイルの戻り値によるエラーハンドリングを行うことがある.\ Cスタイルのエラーハンドリングとは、以下のようなコードを指す.
+
+\begin{verbatim}
+  error_code f() {
+    if(!process1()) {
+      return FAILED_PROCESS1;
+    }
+    if(!process2()) {
+      return FAILED_PROCESS2;
+    }
+    return SUCESS;
+  }
+
+  int main() {
+    error_code error = f();
+    if(error == SUCESS) {
+      // ...
+    } else if(error = FAILED_PROCESS1) {
+      // ...
+    } else if(error = FAILED_PROCESS2) {
+      // ...
+    }
+  }
+\end{verbatim}
+
+プログラマがこのようなエラーハンドリングを行う主な理由は、例外を用いたものよりも処理速度が早いとされているからだ.しかしながら、この手法を用いた場合、コードの見通しが悪くなったり、コードが長くなるという欠点もある.そのコードの一例\cite{JonKalb}が以下のものである.
+
+\begin{verbatim}
+  // 可読性に欠け、かつ冗長である
+  static acl_t CreateReadOnlyForCurrentUserACL(void) {
+    acl_t theACL = NULL;
+    uuid_t theUUID;
+    int result;
+    result = mbr_uid_to_uuid(geteuid(), theUUID);
+    if (result == 0) {
+      theACL = acl_init(1);
+      if (theACL) {
+        Boolean freeACL = true;
+        acl_entry_t newEntry;
+        acl_permset_t newPermSet;
+        result = acl_create_entry_np(&theACL, &newEntry, ACL_FIRST_ENTRY);
+        if (result == 0) {
+          result = acl_set_tag_type(newEntry, ACL_EXTENDED_ALLOW);
+          if (result == 0) {
+            result = acl_set_qualifier(newEntry, (const void *)theUUID);
+            if (result == 0) {
+              result = acl_get_permset(newEntry, &newPermSet);
+              if (result == 0) {
+                result = acl_add_perm(newPermSet, ACL_READ_DATA);
+                if (result == 0) {
+                  result = acl_set_permset(newEntry, newPermSet);
+                  if (result == 0)
+                    freeACL = false;
+                }
+              }
+            }
+          }
+        }
+        if (freeACL) {
+          acl_free(theACL);
+          theACL = NULL;
+        }
+      }
+    }
+    return theACL;
+  }
+\end{verbatim}
+
+この関数を、例外と簡単なラッパークラスおよび関数を用いて書き直すと、次のようになる.
+
+\begin{verbatim}
+  // 例外を用いた場合
+  static acl_t CreateReadOnlyForCurrentUserACL() {
+    ACL theACL(1);
+    acl_entry_t newEntry;
+    acl_create_entry_np(&theACL.get(), &newEntry, ACL_FIRST_ENTRY);
+    
+    acl_set_tag_type(newEntry, ACL_EXTENDED_ALLOW);
+    
+    uuid_t theUUID;
+    mbr_uid_to_uuid(geteuid(), theUUID);
+    acl_set_qualifier(newEntry, (const void *)theUUID);
+    acl_permset_t newPermSet;
+    acl_get_permset(newEntry, &newPermSet);
+    
+    acl_add_perm(newPermSet, ACL_READ_DATA);
+    acl_set_permset(newEntry, newPermSet);
+    
+    return theACL.release();
+  }
+\end{verbatim}
+
+明らかに、例外を用いたほうが見通しもよく、なおかつすべての\verb|if|節を排除することによって、フローの単純化にも成功している.また、この関数は例外中立であるから、すべての例外を適切に呼び出し元に伝播している.
+
+しかし、そもそもCスタイルのエラーハンドリングを行うのは速度が理由であった.ここで問題になるのが、例外機構を使うことで速度はどう変わるのかである.
+
+実は、一概に早くなるとも遅くなるとも言えない.確かに、Cスタイルのエラーハンドリングのほうが早い場合も有るのだが、場合によっては例外を用いたほうが早い場合もある.これはコンパイラがどのように実装されているか\footnote{\texttt{setjmp/longjmp methodとzero-cost methodがある}}によって変わる.
+
+では、Cスタイルをあえて選択する理由はなんだろうか.それは、実行バイナリのサイズが小さいということだ.一般に、例外を用いたコード(というよりは、例外機構を無効にせずにコンパイルされてできたもの)は、実行バイナリのサイズが肥大化する.この場合には、例外ではなく、Cスタイルのエラーハンドリングを選択することになる.
+
+これらを総合すると、C++におけるエラーハンドリングは、バイナリサイズが気にならないのであれば、例外を用いたほうがメリットが大きい、ということになる.
+
+\section{例外指定について}
+
+例外指定とは、ある関数がなげる例外を宣言時に予め明示しておくことである.
+
+\subsection{C++03での例外指定}
+
+\begin{verbatim}
+  void f() throw(int, std::exception);
+\end{verbatim}
+
+上記の関数\verb|f|の実装者は、投げられる例外をあらかじめ\verb|int|か\verb|std::exception|であると明示している.そして、「おそらく」関数\verb|f|は、それらの例外のいずれかしか投げない.
+
+さて、ここで「おそらく」と述べたのは、例外指定されていない型が\verb|throw|されることもあるからである.例外指定は、投げられる例外を制限できる機能ではない.指定された例外以外の例外が投げられた場合、関数\verb|std::unexpected|が呼ばれる.\ \verb|std::unexpected|は、デフォルトでは\verb|std::terminate|を呼び出す.
+
+また、例外指定で何も指定しないことも可能である.このように指定することで、その関数がおそらく例外を投げないことを明示できる.これを無例外指定という.
+
+\begin{verbatim}
+  void g() throw();
+\end{verbatim}
+
+さて、実は例外指定は、無例外指定以外は役に立たない.もしも、投げられる可能性のある例外を、ユーザーに明示したいのであれば、例外指定ではなく、ドキュメントに書くなどすべきである.
+
+\subsection{C++11での例外指定}
+
+C++11から、新たなキーワード\verb|noexcept|が追加されている.これは、コンパイラによる最適化のヒントのために導入された機能である.
+
+\subsubsection{指定子としてのnoexcept}
+
+\begin{verbatim}
+  void f() noexcept;        // 無例外指定. throw()と殆ど同じ.
+  void g() noexcept(true);  // 上と同じ
+  void h() noexcept(false); // どんな例外でも投げうる
+\end{verbatim}
+
+ここで、\verb|noexcept|は、C++03の\verb|throw(std::exception, int)|のような使い方はできない.もちろん、このような例外指定は無意味であるから、使えなくても問題になることはない.
+
+\subsubsection{演算子としてのnoexcept}
+
+\begin{verbatim}
+  void f();
+  void g() noexcept;
+
+  static_assert(noexcept(f()), ""); // error
+  static_assert(noexcept(g()), ""); // ok
+\end{verbatim}
+
+\verb|noexcept(|未評価式\verb|)|で、未評価式が例外を投げる可能性があれば\verb|false|、そうでなければ\verb|true|を返す.これは単に、\verb|noexcept|と指定されている関数を呼び出すかどうかで判断される.
+
+\subsubsection{実際の使用例}
+
+\begin{verbatim}
+  template <typename T>
+  struct foo {
+    void f(T t) noexcpet(std::is_nothrow_constructible<T>::value);
+    void swap(foo& other) noexcept(noexcept(swap(t, other.t)));
+  private:
+    T t;
+  };
+\end{verbatim}
+
+この例では、関数\verb|f|は、型\verb|T|が例外を投げないコンストラクタをもつ場合、\verb|noexcept(true)|となり、無例外指定をしたことになる.逆に、そうでなければ、\verb|noexcept(false)|となり、いかなる例外も投げうるという指定になる.
+
+同様に、関数\verb|swap|は、\verb|swap(t, other.t)|が\verb|noexcept|であれば、\verb|noexcept(true)|となる.
+
+\subsection{noexcept VS. throw()}
+
+\verb|noexcept|と\verb|throw()|は多くの場面で同じ働きをするが、\verb|noexcept|が優れている点がある.
+
+\begin{enumerate}
+  \item \verb|noexcept|で無例外指定をされた関数は、\verb|throw()|で指定されたものより処理速度が早い.というのも、スタックをunwindする必要がなく、いつでもunwindingを中止することができるから\footnote{\texttt{stack unwindingが無いのは危険な気もするが、そもそもnoexcept指定されているにもかかわらず例外を投げるのは明らかにバグである}}だ.\ \verb|throw()|では確実にunwindingが行われる.
+  \item \verb|noexcept|では、\verb|noexcept(|\textit{some-condition}\verb|)|のように条件式が書けるため、先ほどの\verb|swap|のように\verb|template|と組み合わせることで、より強力なプログラムが書ける.
+\end{enumerate}
+
+なお、Dynamic Exception Specifications\footnote{\texttt{throw()やthrow(int, std::exception)などのこと}}と\verb|std::unexpected()|は、C++11からdeprecatedになっている.\newline
+
+無例外指定をしたい場合は、\verb|throw()|ではなく、\verb|noexcept|を使うべきである.
+
+\subsubsection{stack unwindingについての補足}
+
+\verb|return|する、スコープの終端に到達する、あるいは例外が投げられてスコープを脱出する時、そのスコープ内で生成されたオブジェクトはデストラクタが呼ばれ破棄される.スコープから脱出した時にローカルオブジェクトを破棄してデストラクタを呼ぶ、この処理のことをstack unwindingという.なお、\verb|goto|を使った場合はstack unwindingは行われない.\ C++では絶対に使わないように.
+
+余談になるが、コンパイラのunwindを実装方法には、SjLj\footnote{\texttt{SetJmp-LongJmpのことだと思われる.真偽は不明.}}とdwarf2があるらしい.筆者にはそこらの知識がほとんど無いので解説はしないが、興味があれば調べてみると良いだろう.
+
+\subsection{どの関数に無例外指定をするか}
+
+一般的に、以下の状況では、無例外指定をするべきではない.
+
+\begin{itemize}
+  \item パフォーマンスの低下が、どうしても許容できない場合.
+  \item \verb|std::terminate|が呼ばれてほしくない場合.
+  \item 将来的にその関数に変更が加わる可能性がある場合.
+  \item 処理の内容が、本当に例外を投げないか疑わしい場合.
+\end{itemize}
+
+確信を持って\verb|noexcept|指定できないなら、しないほうがいいだろう、ということだ.むやみにしてしまうと、制約のために拡張性が失われたり、予期せぬ例外でプログラムがクラッシュしてしまう.
+
+逆に、\verb|noexcept|指定されるべき関数も存在する.ここまで読んでいればすぐわかると思うが、デストラクタ、ムーブに関わる特殊関数、そして\verb|swap|である.
+
+\subsection{例外指定まとめ}
+
+\begin{itemize}
+  \item \verb|throw(foo, bar)|の形で例外指定をしない.これらには殆ど意味が無い.
+  \item \verb|throw()|ではなく\verb|noexcept|を使う.
+  \item \verb|noexcept|を指定する関数は、そうでなければならない関数、あるいは確固たる自信をもって例外を投げないと言い切れる関数に限る.リソースの解放を行うクリーンアップ関数などがその例.
+\end{itemize}
+
+
+\section{別スレッドの例外を捕捉する}
+
+別スレッドの例外を捕捉するには、\verb|std::exception_ptr|を使う.
+
+\begin{verbatim}
+class my_exception {};
+
+void f(int& ret, std::exception_ptr& ep) {
+  int i = 0;
+  ep = nullptr;
+  try {
+    // ...
+    if(i == -1) {
+      throw my_exception();
+    }
+    ret = i;
+  } catch(...) {
+    ep = std::current_exception();
+  }
+}
+
+int main() {
+  int ret = 0;
+  std::exception_ptr ep;
+  std::thread t(f, std::ref(ret), std::ref(ep));
+  t.join();
+
+  try {
+    if(ep != nullptr) {
+      std::rethrow_exception(ep):
+    }
+  } catch(std::exception const& ex) {
+    std::cerr << ex.what() << std::endl;
+  } catch(my_exception const& ex) {
+    std::cerr << "failed" << std::endl;
+  }
+}
+\end{verbatim}
+
+別スレッドで投げられた例外オブジェクトを\verb|std::current_exception|を用いて\verb|std::exception_ptr|に格納する.そしてその後、メインスレッドで\verb|std::rethrow_exception|を用いて、\verb|std::exception_ptr|に格納された実際の例外オブジェクトを取り出す.
+
+\chapter{終わりに}
+
+いかがだっただろうか.例外安全を意識したことがなかった人の中には、めんどくさいなと思った人もいることだろう.しつこいようだが、例外安全であることは非常に重要なことである.一度例外安全なコードを書けば、それ以降そのコードはみなさんの強力な味方になってくれよう.本記事で紹介した手法などを用いて、ぜひとも例外安全に挑んでいただきたい.
+
+それではみなさん、よいC++ライフを.
+
+\newpage
+\begin{thebibliography}{9}
+  \bibitem{Gargill94} Tom Gargill, ``Exception Handling: A False Sense of Security'.'' C++ Report, Nov-Dec, 1994
+  \bibitem{Sutter99} Herb Sutter, ``Exceptional C++: 47 Engineering Puzzles, Programming Problems, and Solutions'' Nov 28, 1999
+  \bibitem{Sutter01} Herb Sutter, ``More Exceptional C++: 40 New Engineering Puzzles, Programming Problems, and Solutions'' Dec 27, 2001
+  \bibitem{Sutter04} Herb Sutter, ``Exceptional C++ Style: 40 New Engineering Puzzles, Programming Problems, and Solutions'' Aug 12, 2004
+  \bibitem{n3051} Doug Gregor, ``Deprecating Exception Specifications'' Mar 12, 2010
+  \bibitem{Zak} zakkas783, ``C++の例外ハンドリングとパフォーマンス'' Mar 15, 2011
+  \bibitem{JonKalb} Jon Kalb, ``Exception-Safe Coding'' C++Now!2012
+\end{thebibliography}
+\end{document}
