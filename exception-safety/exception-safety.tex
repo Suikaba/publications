@@ -546,9 +546,15 @@ C++11から、新たなキーワード\verb|noexcept|が追加されている.�
 
 \subsubsection{stack unwindingについての補足}
 
-\verb|return|する、スコープの終端に到達する、あるいは例外が投げられてスコープを脱出する時、そのスコープ内で生成されたオブジェクトはデストラクタが呼ばれ破棄される.スコープから脱出した時にローカルオブジェクトを破棄してデストラクタを呼ぶ、この処理のことをstack unwindingという.なお、\verb|goto|を使った場合はstack unwindingは行われない.\ C++では絶対に使わないように.
+\verb|return|する、スコープの終端に到達する、あるいは例外が投げられてスコープを脱出する時、そのスコープ内で生成されたオブジェクトはデストラクタが呼ばれ破棄される.スコープから脱出した時にローカルオブジェクトを破棄してデストラクタを呼ぶ、この処理のことをstack unwindingという.\ stack unwindingは、gotoを用いた場合にも行われる\footnote{N3337 \S 6.6/2 と、\S 6.7のexampleを参照}.
 
-余談になるが、コンパイラのunwindを実装方法には、SjLj\footnote{\texttt{SetJmp-LongJmpのことだと思われる.真偽は不明.}}とdwarf2があるらしい.筆者にはそこらの知識がほとんど無いので解説はしないが、興味があれば調べてみると良いだろう.
+余談になるが、コンパイラのunwindを実装方法には、SjLj(setjmp/longjmp)とdwarf2があるらしい.\ しかしながら、N3337の\S 18.10/4によれば、C++ではlongjmpはstack unwindをしない\footnote{\texttt{こちらの記事も参考になる\ -\ http://stackoverflow.com/questions/1376085/c-safe-to-use-longjmp-and-setjmp}}ため、C++では使うべきではないとされている.以下にその文面を引用する.
+
+\begin{quote}
+    The function signature longjmp(jmp\_buf jbuf, int val) has more restricted behavior in this International
+Standard. A setjmp/longjmp call pair has undefined behavior if replacing the setjmp and longjmp by catch
+and throw would invoke any non-trivial destructors for any automatic objects.
+\end{quote}
 
 \subsection{どの関数に無例外指定をするか}
 
